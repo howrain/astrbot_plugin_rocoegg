@@ -1,7 +1,7 @@
 name: astrbot_plugin_rocoegg
 display_name: 洛克王国查蛋器 - RocoEgg v2.0
 desc: 基于 RocoEgg 数据源的洛克王国蛋数据查询插件。支持查询蛋对应的精灵，一键同步最新数据，定时自动更新，数据收集和反馈。指令：/查蛋 尺寸 重量、/同步蛋数据、/蛋数据状态、/提交蛋数据、/审核蛋数据
-version: v2.0.0
+version: v2.0.1
 author: AI Developer
 repo: https://github.com/nadose/astrbot_plugin_rocoegg
 astrbot_version: ">=4.16"

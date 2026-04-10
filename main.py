@@ -12,7 +12,7 @@
 7. 与上游数据格式完全兼容
 
 作者: AI Developer
-版本: 2.0.0
+版本: 2.0.1
 """
 
 import json
@@ -444,7 +444,7 @@ class DataSyncManager:
 # ============ 插件主类 ============
 
 
-@register("rocoegg", "AI Developer", "洛克王国查蛋器 - RocoEgg", "2.0.0")
+@register("rocoegg", "AI Developer", "洛克王国查蛋器 - RocoEgg", "2.0.1")
 class RocoEggPlugin(Star):
     """洛克王国查蛋器插件主类"""
 
@@ -1148,7 +1148,7 @@ class RocoEggPlugin(Star):
         显示插件帮助信息
         """
         help_text = (
-            f"🥚 洛克王国查蛋器 - RocoEgg v2.0\n"
+            f"🥚 洛克王国查蛋器 - RocoEgg v2.0.1\n"
             f"━━━━━━━━━━━━━━━\n"
             f"📌 基础指令\n"
             f"━━━━━━━━━━━━━━━\n"
