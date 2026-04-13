@@ -1,33 +1,41 @@
 """
-洛克王国查蛋器 - RocoEgg 插件 v2.1
+洛克王国查蛋器 - RocoEgg 插件 v2.3.0
 基于 https://github.com/mfskys/rocomegg 数据源
 
 功能：
 1. 根据尺寸和重量查询蛋对应的精灵
-2. 一键从 GitHub 同步最新数据
+2. 手动或定时同步最新数据
 
 数据收集已移交给上游处理：https://f.wps.cn/ksform/w/write/YUmapbHA/
 
 作者: AI Developer
-版本: 2.1
+版本: 2.3.0
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import math
-from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-import aiohttp
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-from astrbot.api.event import filter, AstrMessageEvent
+import aiohttp
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.api import AstrBotConfig
+
+
+PLUGIN_NAME = "rocoegg"
+PLUGIN_VERSION = "2.3.0"
 
 
 class EggData:
-    """蛋数据结构"""
+    """单条蛋数据。"""
 
     def __init__(
         self,
@@ -46,32 +54,54 @@ class EggData:
         self.weight_max = weight_max
 
     def __repr__(self):
-        return f"EggData({self.pet}: size[{self.size_min}-{self.size_max}], weight[{self.weight_min}-{self.weight_max}])"
+        return (
+            f"EggData({self.pet}: "
+            f"size[{self.size_min}-{self.size_max}], "
+            f"weight[{self.weight_min}-{self.weight_max}])"
+        )
 
 
 class DataSyncManager:
-    """数据同步管理器"""
+    """数据同步管理器。"""
 
-    GITHUB_RAW_URL = "https://raw.githubusercontent.com/mfskys/rocomegg/main/public/data/egg-measurements-final.json"
-    GITHUB_API_URL = "https://api.github.com/repos/mfskys/rocomegg/commits?path=public/data/egg-measurements-final.json&per_page=1"
+    GITHUB_RAW_URL = (
+        "https://raw.githubusercontent.com/"
+        "mfskys/rocomegg/main/public/data/egg-measurements-final.json"
+    )
+    GITHUB_API_URL = (
+        "https://api.github.com/repos/mfskys/rocomegg/commits"
+        "?path=public/data/egg-measurements-final.json&per_page=1"
+    )
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, github_proxy_url: str = ""):
         self.data_dir = data_dir
         self.egg_data_path = data_dir / "egg-measurements-final.json"
         self.sync_info_path = data_dir / "sync_info.json"
+        self.github_proxy_url = (github_proxy_url or "").strip()
         self._ensure_data_dir()
 
     def _ensure_data_dir(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+    def update_proxy_url(self, github_proxy_url: str = ""):
+        self.github_proxy_url = (github_proxy_url or "").strip()
+
+    def _build_request_url(self, url: str) -> str:
+        proxy_url = self.github_proxy_url.rstrip("/")
+        if not proxy_url:
+            return url
+        if "{url}" in proxy_url:
+            return proxy_url.replace("{url}", url)
+        return f"{proxy_url}/{url}"
+
     def load_local_data(self) -> Tuple[List[EggData], int]:
         """
-        加载本地数据
-        支持新旧两种格式：
-        - 新格式 (groups): {"total": 840, "groups": [{"petId", "pet", "rangeItems", "exactItems"}]}
-        - 旧格式 (items): {"total": 371, "items": [{"id", "pet", "eggDiameter", "eggWeight"}]}
+        加载本地数据。
+        支持两种格式：
+        - groups: {"total": 840, "groups": [...]}
+        - items: {"total": 371, "items": [...]}
         """
-        egg_list = []
+        egg_list: List[EggData] = []
 
         if not self.egg_data_path.exists():
             logger.warning(f"本地数据文件不存在: {self.egg_data_path}")
@@ -100,7 +130,7 @@ class DataSyncManager:
                 logger.info(f"成功加载 {len(egg_list)} 条本地蛋数据 (groups 格式)")
                 return egg_list, total
 
-            elif items:
+            if items:
                 total = data.get("total", len(items))
                 for item in items:
                     egg = self._parse_egg_item(item)
@@ -109,16 +139,14 @@ class DataSyncManager:
                 logger.info(f"成功加载 {len(egg_list)} 条本地蛋数据 (items 格式)")
                 return egg_list, total
 
-            else:
-                logger.warning(f"数据文件格式未知")
-                return egg_list, 0
+            logger.warning("数据文件格式未知")
+            return egg_list, 0
 
-        except Exception as e:
-            logger.error(f"加载本地数据失败: {e}")
+        except Exception as exc:
+            logger.error(f"加载本地数据失败: {exc}")
             return egg_list, 0
 
     def _parse_group_item(self, item: Dict, pet: str, pet_id: str) -> Optional[EggData]:
-        """解析 groups 格式中的单个蛋数据项"""
         item_id = item.get("id")
         diameter_str = item.get("eggDiameter", "")
         weight_str = item.get("eggWeight", "")
@@ -142,7 +170,6 @@ class DataSyncManager:
         )
 
     def _parse_egg_item(self, item: Dict) -> Optional[EggData]:
-        """解析旧格式 items 中的单个蛋数据项"""
         item_id = item.get("id")
         pet = item.get("pet")
         diameter_str = item.get("eggDiameter", "")
@@ -167,7 +194,6 @@ class DataSyncManager:
         )
 
     def _parse_range(self, range_str: str) -> Tuple[Optional[float], Optional[float]]:
-        """解析范围字符串，支持格式: "0.25", "0.25-0.32", "0.25~0.32" """
         range_str = str(range_str).strip().replace("~", "-")
 
         if "-" in range_str:
@@ -176,21 +202,21 @@ class DataSyncManager:
                 try:
                     return float(parts[0].strip()), float(parts[1].strip())
                 except ValueError:
-                    pass
-        else:
-            try:
-                val = float(range_str)
-                return val, val
-            except ValueError:
-                pass
-        return None, None
+                    return None, None
+
+        try:
+            val = float(range_str)
+            return val, val
+        except ValueError:
+            return None, None
 
     async def check_update(self) -> Tuple[bool, str, str]:
-        """检查是否有更新"""
+        """检查是否有更新。"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    self.GITHUB_API_URL, timeout=aiohttp.ClientTimeout(total=10)
+                    self._build_request_url(self.GITHUB_API_URL),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
                     if response.status != 200:
                         return False, "", f"GitHub API 请求失败: {response.status}"
@@ -210,19 +236,20 @@ class DataSyncManager:
 
                     return latest_commit != local_commit, latest_commit, commit_date
 
-        except Exception as e:
-            logger.error(f"检查更新失败: {e}")
-            return False, "", f"检查更新失败: {e}"
+        except Exception as exc:
+            logger.error(f"检查更新失败: {exc}")
+            return False, "", f"检查更新失败: {exc}"
 
     async def sync_from_github(self) -> Tuple[bool, str, int]:
-        """从 GitHub 同步数据"""
+        """从 GitHub 或代理同步数据。"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    self.GITHUB_RAW_URL, timeout=aiohttp.ClientTimeout(total=30)
+                    self._build_request_url(self.GITHUB_RAW_URL),
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status != 200:
-                        return False, f"GitHub 数据下载失败: {response.status}", 0
+                        return False, f"数据下载失败: {response.status}", 0
 
                     text = await response.text()
                     data = json.loads(text)
@@ -230,7 +257,7 @@ class DataSyncManager:
                     with open(self.egg_data_path, "w", encoding="utf-8") as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
 
-                    has_update, latest_commit, _ = await self.check_update()
+                    _, latest_commit, _ = await self.check_update()
 
                     sync_info = {
                         "last_sync": datetime.now().isoformat(),
@@ -244,12 +271,12 @@ class DataSyncManager:
                     item_count = data.get("total", 0)
                     return True, "数据同步成功", item_count
 
-        except Exception as e:
-            logger.error(f"数据同步失败: {e}")
-            return False, f"同步失败: {e}", 0
+        except Exception as exc:
+            logger.error(f"数据同步失败: {exc}")
+            return False, f"同步失败: {exc}", 0
 
     def get_sync_status(self) -> Dict:
-        """获取同步状态信息"""
+        """获取同步状态。"""
         status = {
             "has_local_data": self.egg_data_path.exists(),
             "last_sync": None,
@@ -264,38 +291,135 @@ class DataSyncManager:
                     status["last_sync"] = sync_info.get("last_sync")
                     status["last_commit"] = sync_info.get("last_commit")
                     status["total_items"] = sync_info.get("total_items", 0)
-            except:
+            except Exception:
                 pass
 
         return status
 
 
-@register("rocoegg", "AI Developer", "洛克王国查蛋器 - RocoEgg", "2.1")
+@register(PLUGIN_NAME, "AI Developer", "洛克王国查蛋器 - RocoEgg", PLUGIN_VERSION)
 class RocoEggPlugin(Star):
-    """洛克王国查蛋器插件主类"""
+    """洛克王国查蛋器插件主类。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
         self.egg_data: List[EggData] = []
         self.data_manager: Optional[DataSyncManager] = None
+        self.scheduler = AsyncIOScheduler()
+        self.sync_lock = asyncio.Lock()
         self._init_data_dir()
 
     def _init_data_dir(self):
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / "rocoegg"
-        self.data_manager = DataSyncManager(self.data_dir)
+        self.data_manager = DataSyncManager(
+            self.data_dir,
+            self.config.get("github_proxy_url", ""),
+        )
+
+    def _get_config(self) -> Dict:
+        return {
+            "github_proxy_url": self.config.get("github_proxy_url", ""),
+            "auto_sync_enabled": self.config.get("auto_sync_enabled", True),
+            "auto_sync_cron": self.config.get("auto_sync_cron", "0 1 * * *"),
+            "auto_sync_notify_target": self.config.get("auto_sync_notify_target", "").strip(),
+        }
+
+    def _get_auto_sync_job(self):
+        try:
+            return self.scheduler.get_job("rocoegg_auto_sync")
+        except Exception:
+            return None
+
+    def _format_proxy_status(self) -> str:
+        return "已启用" if self.config.get("github_proxy_url", "").strip() else "未启用"
+
+    async def _notify_target(self, message: str):
+        notify_target = self._get_config().get("auto_sync_notify_target", "")
+        if not notify_target:
+            return
+        try:
+            await self.context.send_message(notify_target, MessageChain().message(message))
+        except Exception as exc:
+            logger.error(f"发送定时同步通知失败: {exc}")
+
+    async def _execute_sync(self, source: str = "manual") -> Tuple[bool, str, int]:
+        async with self.sync_lock:
+            config = self._get_config()
+            self.data_manager.update_proxy_url(config.get("github_proxy_url", ""))
+            success, message, item_count = await self.data_manager.sync_from_github()
+            if success:
+                self.egg_data, _ = self.data_manager.load_local_data()
+                logger.info(f"RocoEgg {source} 数据同步成功，共 {item_count} 条")
+            else:
+                logger.error(f"RocoEgg {source} 数据同步失败: {message}")
+            return success, message, item_count
+
+    async def _auto_sync_job(self):
+        success, message, item_count = await self._execute_sync(source="auto")
+        if success:
+            logger.info(f"RocoEgg 定时同步完成，共 {item_count} 条数据")
+            return
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        notify_message = (
+            "RocoEgg 定时同步失败\n"
+            f"时间: {now_str}\n"
+            f"原因: {message}\n"
+            f"代理: {self._format_proxy_status()}"
+        )
+        await self._notify_target(notify_message)
+
+    async def _configure_auto_sync(self):
+        config = self._get_config()
+
+        try:
+            self.scheduler.remove_job("rocoegg_auto_sync")
+        except Exception:
+            pass
+
+        if not config.get("auto_sync_enabled", True):
+            logger.info("RocoEgg 定时同步已关闭")
+            return
+
+        cron_expr = config.get("auto_sync_cron", "0 1 * * *").strip()
+        try:
+            trigger = CronTrigger.from_crontab(cron_expr)
+        except Exception as exc:
+            logger.error(f"RocoEgg 定时同步 cron 配置无效: {cron_expr}, error: {exc}")
+            await self._notify_target(
+                "RocoEgg 定时同步未启动\n"
+                f"原因: cron 配置无效 ({cron_expr})\n"
+                f"错误: {exc}"
+            )
+            return
+
+        self.scheduler.add_job(
+            self._auto_sync_job,
+            trigger=trigger,
+            id="rocoegg_auto_sync",
+            misfire_grace_time=3600,
+        )
+        logger.info(f"RocoEgg 定时同步已启动，cron: {cron_expr}")
 
     async def initialize(self):
-        """插件初始化"""
         logger.info("洛克王国查蛋器插件正在初始化...")
+        self.data_manager.update_proxy_url(self.config.get("github_proxy_url", ""))
         self.egg_data, _ = self.data_manager.load_local_data()
 
         if not self.egg_data:
-            logger.warning("本地无数据，将在首次使用时提示同步")
+            logger.warning("本地暂无蛋数据，首次使用前请先执行 /同步蛋数据")
         else:
             logger.info(f"查蛋器插件初始化完成，已加载 {len(self.egg_data)} 条蛋数据")
 
-    # ============ 命令处理 ============
+        if not self.scheduler.running:
+            self.scheduler.start()
+        await self._configure_auto_sync()
+
+    async def terminate(self):
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+        logger.info("洛克王国查蛋器插件已卸载")
 
     @filter.command("查蛋")
     async def search_egg(self, event: AstrMessageEvent):
@@ -305,20 +429,20 @@ class RocoEggPlugin(Star):
 
         if len(parts) < 3:
             yield event.plain_result(
-                "📋 使用说明\n"
-                "━━━━━━━━━━━━━━━\n"
+                "🔍 使用说明\n"
+                "━━━━━━━━━━━━━━\n"
                 "指令格式：/查蛋 <尺寸> <重量>\n"
                 "示例：/查蛋 0.25 14.5\n\n"
                 "其他指令：\n"
-                "• /同步蛋数据 - 从 GitHub 同步最新数据\n"
-                "• /蛋数据状态 - 查看数据状态"
+                "• /同步蛋数据 - 手动同步最新数据\n"
+                "• /蛋数据状态 - 查看数据和定时同步状态"
             )
             return
 
         if not self.egg_data:
             yield event.plain_result(
                 "⚠️ 暂无数据\n"
-                "━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━\n"
                 "请先使用 /同步蛋数据 获取最新数据\n"
                 "数据源：https://github.com/mfskys/rocomegg"
             )
@@ -340,7 +464,13 @@ class RocoEggPlugin(Star):
             matched_results = [r for r in results_with_prob if r["match_type"] == "matched"]
             nearest_results = [r for r in results_with_prob if r["match_type"] == "nearest"]
 
-            result = f"🥚 查询结果\n━━━━━━━━━━━━━━━\n📏 尺寸：{size:.3f}\n⚖️ 重量：{weight:.3f}\n━━━━━━━━━━━━━━━\n"
+            result = (
+                "🥚 查询结果\n"
+                "━━━━━━━━━━━━━━\n"
+                f"📏 尺寸：{size:.3f}\n"
+                f"⚖️ 重量：{weight:.3f}\n"
+                "━━━━━━━━━━━━━━\n"
+            )
 
             if exact_results:
                 result += f"🎯 精确匹配（{len(exact_results)}个）：\n"
@@ -358,19 +488,22 @@ class RocoEggPlugin(Star):
                 result += "\n"
 
             if nearest_results and not matched_results:
-                result += f"💡 最接近的候选（{len(nearest_results)}个）：\n"
+                result += f"📌 最接近的候选（{len(nearest_results)}个）：\n"
                 for i, item in enumerate(nearest_results[:5], 1):
                     result += f"  {i}. {item['pet']} {item['probability_str']}\n"
                 result += "\n"
 
-            result += "💡 概率基于高斯分布和范围匹配度计算"
+            result += "📌 概率基于高斯分布和范围匹配度计算"
         else:
             result = (
-                f"🥚 查询结果\n━━━━━━━━━━━━━━━\n"
-                f"📏 尺寸：{size:.3f}\n⚖️ 重量：{weight:.3f}\n━━━━━━━━━━━━━━━\n"
-                f"❌ 未找到匹配的精灵\n\n"
-                f"📤 数据收集请提交至：\n"
-                f"https://f.wps.cn/ksform/w/write/YUmapbHA/"
+                "🥚 查询结果\n"
+                "━━━━━━━━━━━━━━\n"
+                f"📏 尺寸：{size:.3f}\n"
+                f"⚖️ 重量：{weight:.3f}\n"
+                "━━━━━━━━━━━━━━\n"
+                "❌ 未找到匹配的精灵\n\n"
+                "📝 数据收集请提交至：\n"
+                "https://f.wps.cn/ksform/w/write/YUmapbHA/"
             )
 
         yield event.plain_result(result)
@@ -378,64 +511,83 @@ class RocoEggPlugin(Star):
     @filter.command("同步蛋数据")
     async def sync_data(self, event: AstrMessageEvent):
         """同步数据指令：/同步蛋数据"""
-        yield event.plain_result("🔄 正在从 GitHub 同步数据...")
+        yield event.plain_result("🔄 正在同步蛋数据，请稍候...")
 
-        success, message, item_count = await self.data_manager.sync_from_github()
+        success, message, item_count = await self._execute_sync(source="manual")
 
         if success:
-            self.egg_data, _ = self.data_manager.load_local_data()
             yield event.plain_result(
-                f"✅ 数据同步成功\n"
-                f"━━━━━━━━━━━━━━━\n"
+                "✅ 数据同步成功\n"
+                "━━━━━━━━━━━━━━\n"
                 f"📊 数据条数：{item_count}\n"
                 f"💾 保存路径：{self.data_manager.egg_data_path}\n"
-                f"⏰ 同步时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                f"🕒 同步时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         else:
             yield event.plain_result(
-                f"❌ 数据同步失败\n"
-                f"━━━━━━━━━━━━━━━\n"
+                "❌ 数据同步失败\n"
+                "━━━━━━━━━━━━━━\n"
                 f"错误信息：{message}\n\n"
-                f"💡 提示：\n"
-                f"• 请检查网络连接\n"
-                f"• GitHub 可能需要代理访问"
+                "📌 提示：\n"
+                "• 请检查网络连接\n"
+                "• 如访问 GitHub 较慢，可在 WebUI 配置 github_proxy_url"
             )
 
     @filter.command("蛋数据状态")
     async def data_status(self, event: AstrMessageEvent):
         """数据状态指令：/蛋数据状态"""
+        config = self._get_config()
+        self.data_manager.update_proxy_url(config.get("github_proxy_url", ""))
         status = self.data_manager.get_sync_status()
 
-        if status["has_local_data"]:
-            last_sync = status.get("last_sync", "未知")
-            if last_sync and last_sync != "未知":
-                try:
-                    sync_time = datetime.fromisoformat(last_sync)
-                    last_sync = sync_time.strftime("%Y-%m-%d %H:%M:%S")
-                except:
-                    pass
-
+        last_sync = status.get("last_sync", "未知")
+        if last_sync and last_sync != "未知":
             try:
-                has_update, _, _ = await self.data_manager.check_update()
-                update_status = "🟢 有更新可用" if has_update else "🟢 已是最新"
-            except:
-                update_status = "⚪ 无法检查"
+                last_sync = datetime.fromisoformat(last_sync).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
 
+        try:
+            has_update, _, _ = await self.data_manager.check_update()
+            update_status = "🆕 有更新可用" if has_update else "✅ 已是最新"
+        except Exception:
+            update_status = "⚠️ 无法检查远程更新"
+
+        auto_sync_enabled = "开启" if config.get("auto_sync_enabled", True) else "关闭"
+        auto_sync_cron = config.get("auto_sync_cron", "0 1 * * *")
+        job_registered = "已注册" if self._get_auto_sync_job() else "未注册"
+        notify_target = config.get("auto_sync_notify_target", "")
+        notify_status = notify_target if notify_target else "未配置"
+
+        if status["has_local_data"]:
             result = (
-                f"📊 数据状态\n━━━━━━━━━━━━━━━\n"
-                f"✅ 数据状态：已加载\n"
+                "📊 数据状态\n"
+                "━━━━━━━━━━━━━━\n"
+                "✅ 数据状态：已加载\n"
                 f"📦 数据条数：{status['total_items']}\n"
-                f"⏰ 最后同步：{last_sync}\n"
+                f"🕒 最后同步：{last_sync}\n"
                 f"🔖 Commit：{status['last_commit'][:8] if status['last_commit'] else 'N/A'}...\n"
                 f"{update_status}\n\n"
-                f"💡 使用 /同步蛋数据 更新数据"
+                "⏰ 定时同步\n"
+                f"• 开关：{auto_sync_enabled}\n"
+                f"• Cron：{auto_sync_cron}\n"
+                f"• 任务：{job_registered}\n"
+                f"• 通知 UMO：{notify_status}\n"
+                f"• 代理：{self._format_proxy_status()}"
             )
         else:
             result = (
-                f"📊 数据状态\n━━━━━━━━━━━━━━━\n"
-                f"⚠️ 数据状态：未加载\n"
-                f"📦 数据条数：0\n\n"
-                f"💡 首次使用请先执行：/同步蛋数据"
+                "📊 数据状态\n"
+                "━━━━━━━━━━━━━━\n"
+                "⚠️ 数据状态：未加载\n"
+                "📦 数据条数：0\n\n"
+                "⏰ 定时同步\n"
+                f"• 开关：{auto_sync_enabled}\n"
+                f"• Cron：{auto_sync_cron}\n"
+                f"• 任务：{job_registered}\n"
+                f"• 通知 UMO：{notify_status}\n"
+                f"• 代理：{self._format_proxy_status()}\n\n"
+                "📌 首次使用请先执行：/同步蛋数据"
             )
 
         yield event.plain_result(result)
@@ -443,24 +595,33 @@ class RocoEggPlugin(Star):
     @filter.command("rocoegg帮助")
     async def show_help(self, event: AstrMessageEvent):
         """帮助指令：/rocoegg帮助"""
-        yield event.plain_result(
-            f"🥚 洛克王国查蛋器 - RocoEgg v2.1\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🔍 /查蛋 <尺寸> <重量>\n"
-            f" 根据尺寸和重量查询蛋对应的精灵\n"
-            f" 示例：/查蛋 0.25 14.5\n\n"
-            f"🔄 /同步蛋数据\n"
-            f" 从 GitHub 同步最新的蛋数据\n\n"
-            f"📊 /蛋数据状态\n"
-            f" 查看当前数据同步状态\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"📚 数据来源\n"
-            f"https://github.com/mfskys/rocomegg\n\n"
-            f"📤 数据收集（提交新蛋数据）\n"
-            f"https://f.wps.cn/ksform/w/write/YUmapbHA/"
-        )
+        config = self._get_config()
+        auto_sync_enabled = "开启" if config.get("auto_sync_enabled", True) else "关闭"
+        auto_sync_cron = config.get("auto_sync_cron", "0 1 * * *")
 
-    # ============ 查询算法 ============
+        yield event.plain_result(
+            f"🥚 洛克王国查蛋器 - RocoEgg v{PLUGIN_VERSION}\n"
+            "━━━━━━━━━━━━━━\n"
+            "📘 /查蛋 <尺寸> <重量>\n"
+            " 根据尺寸和重量查询蛋对应的精灵\n"
+            " 示例：/查蛋 0.25 14.5\n\n"
+            "🔄 /同步蛋数据\n"
+            " 手动同步最新蛋数据\n\n"
+            "📊 /蛋数据状态\n"
+            " 查看数据状态和定时同步状态\n\n"
+            "⏰ 当前定时同步配置\n"
+            f" 开关：{auto_sync_enabled}\n"
+            f" Cron：{auto_sync_cron}\n\n"
+            "🌐 WebUI 配置项\n"
+            " github_proxy_url：GitHub 代理加速地址\n"
+            " auto_sync_enabled：是否启用定时同步\n"
+            " auto_sync_cron：cron 表达式\n"
+            " auto_sync_notify_target：失败通知 UMO，例如 獭獭:FriendMessage:942648152\n\n"
+            "📎 数据来源\n"
+            "https://github.com/mfskys/rocomegg\n\n"
+            "📝 数据收集\n"
+            "https://f.wps.cn/ksform/w/write/YUmapbHA/"
+        )
 
     def _is_point_range(self, min_val: float, max_val: float) -> bool:
         return abs(max_val - min_val) < 1e-12
@@ -491,14 +652,15 @@ class RocoEggPlugin(Star):
         return min(max_val, max(min_val, v))
 
     def _evaluate_egg(self, diameter: float, weight: float, egg: EggData) -> Dict:
-        """评估单个蛋数据的匹配度"""
+        """评估单个蛋数据的匹配度。"""
         d_in = self._in_range(diameter, egg.size_min, egg.size_max)
         w_in = self._in_range(weight, egg.weight_min, egg.weight_max)
         d_point = self._is_point_range(egg.size_min, egg.size_max)
         w_point = self._is_point_range(egg.weight_min, egg.weight_max)
 
         exact = (
-            d_point and w_point
+            d_point
+            and w_point
             and self._nearly_equal(diameter, egg.size_min)
             and self._nearly_equal(weight, egg.weight_min)
         )
@@ -533,36 +695,34 @@ class RocoEggPlugin(Star):
         return {"match_type": "nearest", "score": score, "egg": egg}
 
     def _aggregate_by_pet(self, evaluated: List[Dict]) -> List[Dict]:
-        """按精灵聚合并计算综合得分"""
-        groups = {}
+        """按精灵聚合并计算综合得分。"""
+        groups: Dict[str, List[Dict]] = {}
         for item in evaluated:
             pet = item["egg"].pet
-            if pet not in groups:
-                groups[pet] = []
-            groups[pet].append(item)
+            groups.setdefault(pet, []).append(item)
 
         merged = []
         for pet, items in groups.items():
             sorted_items = sorted(items, key=lambda x: x["score"], reverse=True)
-            pet_score = sum(
-                item["score"] * math.pow(0.58, i) for i, item in enumerate(sorted_items)
-            )
+            pet_score = sum(item["score"] * math.pow(0.58, i) for i, item in enumerate(sorted_items))
             best = sorted_items[0]
             egg = best["egg"]
 
-            merged.append({
-                "pet": pet,
-                "pet_id": egg.id,
-                "match_count": len(sorted_items),
-                "_score": pet_score,
-                "egg": egg,
-                "match_type": best["match_type"],
-            })
+            merged.append(
+                {
+                    "pet": pet,
+                    "pet_id": egg.id,
+                    "match_count": len(sorted_items),
+                    "_score": pet_score,
+                    "egg": egg,
+                    "match_type": best["match_type"],
+                }
+            )
 
         return sorted(merged, key=lambda x: x["_score"], reverse=True)
 
     def _normalize_probabilities(self, items: List[Dict]) -> List[Dict]:
-        """归一化概率"""
+        """归一化概率。"""
         total_score = sum(item["_score"] for item in items)
 
         if total_score <= 0:

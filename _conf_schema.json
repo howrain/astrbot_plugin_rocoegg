@@ -1,1 +1,26 @@
-{}
+{
+  "github_proxy_url": {
+    "description": "GitHub 代理加速地址",
+    "type": "string",
+    "default": "",
+    "hint": "留空时直连 GitHub。可填写代理前缀，如 https://ghfast.top/ 或 https://mirror.ghproxy.com/；也支持模板形式 https://your-proxy.example.com/{url}"
+  },
+  "auto_sync_enabled": {
+    "description": "启用定时同步",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，插件会按 auto_sync_cron 定时自动同步蛋数据"
+  },
+  "auto_sync_cron": {
+    "description": "定时同步 Cron 表达式",
+    "type": "string",
+    "default": "0 1 * * *",
+    "hint": "使用标准 5 段 cron 表达式，默认每天凌晨 1 点自动同步"
+  },
+  "auto_sync_notify_target": {
+    "description": "定时同步失败通知 UMO",
+    "type": "string",
+    "default": "",
+    "hint": "留空则不主动通知。支持 UMO 写法，例如：獭獭:FriendMessage:942648152"
+  }
+}
