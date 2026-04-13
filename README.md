@@ -1,4 +1,4 @@
-# 洛克王国查蛋器 - RocoEgg v2.3.0
+# 洛克王国查蛋器 - RocoEgg v2.3.1
 
 基于 [RocoEgg](https://github.com/mfskys/rocomegg) 数据源的 AstrBot 查蛋插件。
 
@@ -8,6 +8,7 @@
 - 手动同步：支持手动拉取最新蛋数据
 - 定时同步：支持从 WebUI 配置 cron，默认每天凌晨 1 点自动同步
 - 代理加速：支持通过 `github_proxy_url` 配置 GitHub 代理地址
+- 自定义数据源：支持通过 `data_source_url` 配置蛋数据拉取地址
 - 失败通知：定时同步失败时可按 UMO 目标主动发送通知
 
 ## 安装
@@ -23,6 +24,7 @@
 | 配置项 | 说明 |
 |------|------|
 | `github_proxy_url` | GitHub 代理加速地址。留空时直连 GitHub，支持直接填写前缀，如 `https://ghfast.top/`，也支持模板形式 `https://your-proxy.example.com/{url}` |
+| `data_source_url` | 蛋数据拉取地址。默认是当前官方 raw 链接，也可以改成镜像源、自建源或其他兼容 JSON 地址 |
 | `auto_sync_enabled` | 是否启用定时同步，默认开启 |
 | `auto_sync_cron` | 标准 5 段 cron 表达式，默认 `0 1 * * *`，即每天凌晨 1 点 |
 | `auto_sync_notify_target` | 定时同步失败通知 UMO。留空则不主动通知，示例：`獭獭:FriendMessage:942648152` |

@@ -5,6 +5,12 @@
     "default": "",
     "hint": "留空时直连 GitHub。可填写代理前缀，如 https://ghfast.top/ 或 https://mirror.ghproxy.com/；也支持模板形式 https://your-proxy.example.com/{url}"
   },
+  "data_source_url": {
+    "description": "蛋数据拉取地址",
+    "type": "string",
+    "default": "https://raw.githubusercontent.com/mfskys/rocomegg/main/public/data/egg-measurements-final.json",
+    "hint": "默认使用当前官方 raw 链接。可改为镜像源、自建源或其他兼容 JSON 数据地址"
+  },
   "auto_sync_enabled": {
     "description": "启用定时同步",
     "type": "bool",
@@ -21,6 +27,6 @@
     "description": "定时同步失败通知 UMO",
     "type": "string",
     "default": "",
-    "hint": "留空则不主动通知。支持 UMO 写法，例如：獭獭:FriendMessage:942648152"
+    "hint": "留空则不主动通知。支持 UMO 写法，例如：平台:FriendMessage:123456"
   }
 }
